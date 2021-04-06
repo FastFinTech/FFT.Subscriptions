@@ -9,10 +9,9 @@ namespace FFT.Subscriptions.Tests
   [TestClass]
   public class SubscriptionListTests
   {
-    [TestMethod]
-    public async Task TestMethod1()
-    {
-      await using var list = new SubscriptionList<object>();
-    }
+    //[TestMethod]
+    //public async Task TestMethod1()
+    //{
+    //}
   }
 }

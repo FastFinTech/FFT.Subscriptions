@@ -14,8 +14,6 @@ namespace FFT.Subscriptions
   public sealed partial class SubscriptionManager<TKey> : AsyncDisposeBase
     where TKey : notnull
   {
-    private static readonly ImmutableQueue<Subscription> _emptyQueue = ImmutableQueue<Subscription>.Empty;
-
     private readonly SubscriptionManagerOptions<TKey> _options;
 
     /// <summary>
@@ -34,19 +32,19 @@ namespace FFT.Subscriptions
     /// <summary>
     /// Signals when a subscription is added or removed.
     /// </summary>
-    private readonly AsyncAutoResetEvent _signalEvent = new(false);
+    private readonly AsyncAutoResetEvent _subscriptionChangeEvent = new(false);
 
     /// <summary>
     /// Used to marshal new subscription requests into a thread-safe context.
     /// Null when disposal has begun.
     /// </summary>
-    private ImmutableQueue<Subscription>? _newSubscriptions = _emptyQueue;
+    private ImmutableQueue<Subscription>? _subscriptionsToStart = ImmutableQueue<Subscription>.Empty;
 
     /// <summary>
     /// Used to marshal subscription cancellations into a thread-safe context.
     /// Null when disposal has begun.
     /// </summary>
-    private ImmutableQueue<Subscription>? _cancelSubscriptions = _emptyQueue;
+    private ImmutableQueue<Subscription>? _subscriptionsToCancel = ImmutableQueue<Subscription>.Empty;
 
     public SubscriptionManager(SubscriptionManagerOptions<TKey> options)
     {
@@ -54,24 +52,30 @@ namespace FFT.Subscriptions
       _workTask = Task.Run(WorkAsync);
     }
 
-    public ISubscriber CreateSubscriber(TKey streamId)
+    /// <summary>
+    /// Call this method to create a new subscription to the given <paramref
+    /// name="streamId"/>. Internally, new data connections may be created if
+    /// this is the first subscription for a particular <paramref
+    /// name="streamId"/>.
+    /// </summary>
+    public ISubscription Subscribe(TKey streamId)
     {
-      var subscription = new Subscription(streamId, this);
-      ImmutableInterlocked.Update(ref _newSubscriptions, Transform, subscription);
-      _signalEvent.Set();
+      var subscription = new Subscription(this, streamId);
+      ImmutableInterlocked.Update(ref _subscriptionsToStart, Transform, subscription);
+      _subscriptionChangeEvent.Set();
       return subscription;
 
-      static ImmutableQueue<Subscription>? Transform(ImmutableQueue<Subscription>? newSubscriptions, Subscription subscription)
+      static ImmutableQueue<Subscription>? Transform(ImmutableQueue<Subscription>? list, Subscription subscription)
       {
         // Check for disposal.
-        if (newSubscriptions is null)
+        if (list is null)
         {
           // Inform user code that no data will be provided for this subscription.
           subscription.Complete();
           return null;
         }
 
-        return newSubscriptions.Enqueue(subscription);
+        return list.Enqueue(subscription);
       }
     }
 
@@ -80,22 +84,22 @@ namespace FFT.Subscriptions
     /// disposed. Typically, this happens when user code no longer wants to
     /// receive subscription updates.
     /// </summary>
-    private void EnqueueRemoval(Subscription subscription)
+    private void Unsubscribe(Subscription subscription)
     {
-      ImmutableInterlocked.Update(ref _cancelSubscriptions, Transform, subscription);
-      _signalEvent.Set();
+      ImmutableInterlocked.Update(ref _subscriptionsToCancel, Transform, subscription);
+      _subscriptionChangeEvent.Set();
 
-      static ImmutableQueue<Subscription>? Transform(ImmutableQueue<Subscription>? cancelSubscriptions, Subscription subscription)
+      static ImmutableQueue<Subscription>? Transform(ImmutableQueue<Subscription>? list, Subscription subscription)
       {
         // Check for disposal.
-        if (cancelSubscriptions is null)
+        if (list is null)
         {
           // Inform user code that no data will be provided for this subscription.
           subscription.Complete();
           return null;
         }
 
-        return cancelSubscriptions.Enqueue(subscription);
+        return list.Enqueue(subscription);
       }
     }
 
@@ -104,20 +108,20 @@ namespace FFT.Subscriptions
 
     private async Task WorkAsync()
     {
-      var streams = new Dictionary<TKey, IStream>();
+      var streams = new Dictionary<TKey, IBroadcastHub>();
 
       try
       {
-        var signalTask = _signalEvent.WaitAsync(DisposedToken);
-        var readTask = _options.GetNextMessage(DisposedToken);
+        var signalTask = _subscriptionChangeEvent.WaitAsync(DisposedToken);
+        var readTask = _options.GetNextMessage(this, DisposedToken);
 
 waitSignal:
 
-        if (signalTask.IsCompleted)
-          goto subscriptionsChanged;
-
         if (readTask.IsCompleted)
           goto handleMessage;
+
+        if (signalTask.IsCompleted)
+          goto subscriptionsChanged;
 
         await Task.WhenAny(signalTask, readTask.AsTask());
         goto waitSignal;
@@ -125,27 +129,27 @@ waitSignal:
 subscriptionsChanged:
 
         await signalTask;
-        signalTask = _signalEvent.WaitAsync(DisposedToken);
+        signalTask = _subscriptionChangeEvent.WaitAsync(DisposedToken);
 
-        foreach (var subscription in PopQueue(ref _newSubscriptions))
+        foreach (var subscription in PopQueue(ref _subscriptionsToStart))
         {
           if (!streams.TryGetValue(subscription.StreamId, out var stream))
           {
-            stream = await _options.CreateStream(subscription.StreamId);
+            stream = await _options.StartStream(this, subscription.StreamId);
             streams[subscription.StreamId] = stream;
           }
 
-          stream.AddSubscription(subscription);
+          stream.AddSubscriber(subscription);
         }
 
-        foreach (var subscription in PopQueue(ref _cancelSubscriptions))
+        foreach (var subscription in PopQueue(ref _subscriptionsToCancel))
         {
           if (streams.TryGetValue(subscription.StreamId, out var stream))
           {
-            stream.RemoveSubscription(subscription);
-            if (stream.SubscriptionCount == 0)
+            stream.RemoveSubscriber(subscription);
+            if (stream.SubscriberCount == 0)
             {
-              await _options.EndStream(subscription.StreamId);
+              await _options.EndStream(this, subscription.StreamId);
               stream.Complete();
               streams.Remove(subscription.StreamId);
             }
@@ -157,16 +161,17 @@ subscriptionsChanged:
         goto waitSignal;
 
 handleMessage:
-
-        var (streamId, message) = await readTask;
-        readTask = _options.GetNextMessage(DisposedToken);
-
-        if (streams.TryGetValue(streamId, out var stream))
         {
-          stream.Handle(message);
-        }
+          var (streamId, message) = await readTask;
+          readTask = _options.GetNextMessage(this, DisposedToken);
 
-        goto waitSignal;
+          if (streams.TryGetValue(streamId, out var stream))
+          {
+            stream.Handle(message);
+          }
+
+          goto waitSignal;
+        }
       }
       catch (Exception x)
       {
@@ -174,14 +179,14 @@ handleMessage:
       }
       finally
       {
-        var newSubscriptions = Interlocked.Exchange(ref _newSubscriptions, null);
+        var newSubscriptions = Interlocked.Exchange(ref _subscriptionsToStart, null);
         if (newSubscriptions is not null)
         {
           foreach (var subscription in newSubscriptions)
             subscription.Complete();
         }
 
-        var cancelSubscriptions = Interlocked.Exchange(ref _cancelSubscriptions, null);
+        var cancelSubscriptions = Interlocked.Exchange(ref _subscriptionsToCancel, null);
         if (cancelSubscriptions is not null)
         {
           foreach (var subscription in cancelSubscriptions)
@@ -192,7 +197,7 @@ handleMessage:
         {
           try
           {
-            await _options.EndStream(streamId);
+            await _options.EndStream(this, streamId);
           }
           catch { }
           stream.Complete();
@@ -210,12 +215,12 @@ handleMessage:
     {
       ImmutableQueue<Subscription>? result = null;
       ImmutableInterlocked.Update(ref queue, Transform);
-      return result ?? _emptyQueue;
+      return result ?? ImmutableQueue<Subscription>.Empty;
 
       ImmutableQueue<Subscription>? Transform(ImmutableQueue<Subscription>? queue)
       {
         result = queue;
-        return result is null ? null : _emptyQueue;
+        return result is null ? null : ImmutableQueue<Subscription>.Empty;
       }
     }
   }

@@ -1,114 +1,80 @@
 ﻿// Copyright (c) True Goodwill. All rights reserved.
 // Licensed under the MIT license. See LICENSE file in the project root for full license information.
 
-namespace FFT.Subscriptions.Example
-{
-  using System;
-  using System.Collections.Concurrent;
-  using System.Collections.Generic;
-  using System.Diagnostics;
-  using System.Net.WebSockets;
-  using System.Threading;
-  using System.Threading.Tasks;
-  using FFT.Disposables;
-  using Nito.AsyncEx;
+#pragma warning disable SA1200 // Using directives should be placed correctly
 
-  internal sealed partial class Program : AsyncDisposeBase
+using System;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using FFT.Subscriptions;
+using FFT.Subscriptions.Example;
+
+// We'll use this to signal completion of the program.
+using var cts = new CancellationTokenSource();
+
+// Setup a simulation input feed. In real life, it might be a websocket or any
+// other kind of facility that provides data.
+await using var fakeFeed = new FakeFeed();
+
+// Create a subscription manager that consumes data from the input feed and
+// redistributes it to various program components that want to consume it. The
+// subscription manager will also provide a way for the various program
+// components to subscribe and unsubscribe from various data feeds.
+await using var subscriptionManager = new SubscriptionManager<string>(
+  new SubscriptionManagerOptions<string>
   {
-    private static Task Main(string[] args)
-      => new Program().DisposedTask;
-  }
-
-  internal partial class Program
-  {
-    private readonly List<string> _newSubscriptions = new();
-    private readonly List<string> _removedSubscriptions = new();
-    private readonly AutoResetEvent _
-    private readonly ConcurrentDictionary<string, SubscriptionManager<object>> _streams = new();
-
-    public Program()
+    StartStream = (requester, streamId, cancellationToken) =>
     {
-      Task.Run(WorkAsync).Ignore();
-      Task.Run(async () =>
-      {
-        var rand = new Random();
-        var availableSubscriptions = new[] { "Shoes", "Hats", "Vests", "Ties" };
-        var subscribers = new List<Subscriber>();
-
-        // ninety seconds worth of starting and ending subscriptions.
-        for (var i = 0; i < 90; i++)
-        {
-          var subscriptionName = availableSubscriptions[rand.Next(0, 3)];
-          subscribers.Add(new Subscriber(subscriptionName, Subscribe(subscriptionName)));
-          if (subscribers.Count > 4)
-          {
-            var indexToRemove = rand.Next(0, subscribers.Count - 1);
-            subscribers[indexToRemove].EndSubscription();
-            subscribers.RemoveAt(indexToRemove);
-          }
-
-          await Task.Delay(1000);
-        }
-
-        await DisposeAsync();
-      }).Ignore();
-    }
-
-    public ISubscriber<object> Subscribe(string subscriptionName)
+      Console.WriteLine($"Starting stream '{streamId}'.");
+      // The given stream is being subscribed to for the first time, so we
+      // simulate requesting data from the input feed.
+      fakeFeed.Subscribe(streamId);
+      // Return an IBroadcastHub that will redistribute the feed's data to the
+      // various subscribers.
+      return new(new DefaultBroadcastHub());
+    },
+    EndStream = (requester, streamId) =>
     {
-      var stream = _streams.GetOrAdd(subscriptionName, static _ => new SubscriptionList<object>());
-      return stream.CreateSubscriber();
-    }
-
-    private async Task WorkAsync()
+      Console.WriteLine($"Ending stream '{streamId}'.");
+      // No more subscribers are using the given feed, so we simulate
+      // unsubscribing this stream from the input feed.
+      fakeFeed.Unsubscribe(streamId);
+      return default;
+    },
+    GetNextMessage = async (requester, cancellationToken) =>
     {
-      using var ws = new ClientWebSocket();
-      await ws.ConnectAsync(new("wss://somefeed"), default);
-      var buffer = new byte[1024];
-      while (true)
-      {
-        await ws.ReceiveAsync(buffer, default);
-      }
-    }
-  }
+      using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, cts.Token);
+      var message = await fakeFeed.Reader.ReadAsync(linked.Token);
+      var streamId = message.Substring(0, message.IndexOf('_'));
+      return (streamId, message);
+    },
+  });
 
-  internal abstract class Stream
-  {
-    public abstract Task InitializeAsync();
-  }
+// Now we create a bunch of components that want to consume the data. Start off
+// by creating two subscribers to the same stream.
+var bitcoin1 = subscriptionManager.Subscribe("Bitcoin");
+var bitcoin2 = subscriptionManager.Subscribe("Bitcoin");
 
-  internal sealed class Subscriber
-  {
-    private readonly ISubscriber<object> _reader;
+// And one subscriber to another stream.
+var etherium1 = subscriptionManager.Subscribe("Etherium");
 
-    public Subscriber(string subscriptionName, ISubscriber<object> reader)
-    {
-      _reader = reader;
-      SubscriptionName = subscriptionName;
-      Task.Run(ReadMessagesAsync).Ignore();
-    }
+// ... the fake feed will be providing stream data, which is redistributed to
+// the various subscribers that we created above.
+await Task.Delay(1100);
 
-    public string SubscriptionName { get; }
+// Unsubscribe all but one of the subscribers. The shirts stream will completely
+// stop, because there are no subscribers left for it. The shoes stream will
+// continue supplying data, because there is still one subscriber attached to
+// it.
+bitcoin2.Dispose();
+etherium1.Dispose();
 
-    public void EndSubscription()
-    {
-      _reader.Dispose();
-    }
+await Task.Delay(1100);
+bitcoin1.Dispose();
 
-    async Task ReadMessagesAsync()
-    {
-      try
-      {
-        while (true)
-        {
-          await _reader.Reader.ReadAsync(default);
-        }
-      }
-      catch (Exception x)
-      {
-        // just wanna check what exception is thrown when the reader is completed.
-        Debugger.Break();
-      }
-    }
-  }
-}
+Console.WriteLine($"bitcoin1 count = {await bitcoin1.Reader.ReadAllAsync().CountAsync()}");
+Console.WriteLine($"bitcoin2 count = {await bitcoin2.Reader.ReadAllAsync().CountAsync()}");
+Console.WriteLine($"etherium1 count = {await etherium1.Reader.ReadAllAsync().CountAsync()}");
+
+cts.Cancel();

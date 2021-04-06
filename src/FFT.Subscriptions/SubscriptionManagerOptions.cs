@@ -7,29 +7,76 @@ namespace FFT.Subscriptions
   using System.Threading;
   using System.Threading.Tasks;
 
+  /// <summary>
+  /// Contains methods the that <see cref="SubscriptionManager{TKey}"/> can call
+  /// to complete its operations.
+  /// </summary>
+  /// <typeparam name="TKey">The type of the stream id.</typeparam>
+  /// <remarks>
+  /// All methods are guaranteed to be called sequentially and without
+  /// interleaving by a given <see cref="SubscriptionManager{TKey}"/>
+  /// "requester". If you have more than one <see
+  /// cref="SubscriptionManager{TKey}"/> "requester" accessing the same method
+  /// instances, you will need to make your own threadsafety guarantees within
+  /// the implementation of each method. The "requester" parameter is added to
+  /// each method's signature to help you facilitate this if necessary.
+  /// </remarks>
   public sealed class SubscriptionManagerOptions<TKey>
     where TKey : notnull
   {
 #pragma warning disable CS8618 // Non-nullable field must contain a non-null value when exiting constructor. Consider declaring as nullable.
 
     /// <summary>
-    /// Method called by the <see cref="SubscriptionManager{TKey}"/> when the
-    /// first subcription is made for a given stream.
+    /// Called when the first subscription is made for a given stream. Starts
+    /// the underlying data connection.
     /// </summary>
-    public Func<TKey, ValueTask<IStream>> CreateStream { get; init; }
+    /// <param name="requester">The <see cref="SubscriptionManager{TKey}"/> that
+    /// is requesting the subscription start.</param>
+    /// <param name="streamId">The id of the stream to be started.</param>
+    /// <param name="cancellationToken">Cancels the operation.</param>
+    /// <returns>
+    /// Returns a <see cref="IBroadcastHub"/> that allows customized handling of
+    /// message publishing and subscriber adding / removing.
+    /// </returns>
+    /// <exception cref="OperationCanceledException">Thrown when the operation
+    /// is cancelled, not only because of the cancellation token, but also
+    /// possibly because of internal data connections shutting down.</exception>
+    public delegate ValueTask<IBroadcastHub> StartStreamDelegate(SubscriptionManager<TKey> requester, TKey streamId, CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Method called by the <see cref="SubscriptionManager{TKey}"/> when the
-    /// last remaining subscription for a given stream is unsubscribed.
+    /// Called when the last subscription is cancelled for a given stream. Ends
+    /// the underlying data connection.
     /// </summary>
-    public Func<TKey, ValueTask> EndStream { get; init; }
+    /// <param name="requester">The <see cref="SubscriptionManager{TKey}"/> that
+    /// is requesting the subscription start.</param>
+    /// <param name="streamId">The id of the stream to be ended.</param>
+    public delegate ValueTask EndStreamDelegate(SubscriptionManager<TKey> requester, TKey streamId);
 
     /// <summary>
-    /// Method called by the <see cref="SubscriptionManager{TKey}"/> to retrieve
-    /// the next message. Throw an <see cref="OperationCanceledException"/> if
-    /// you are no longer providing messages, or if the given cancellation token
-    /// is canceled.
+    /// Called when the <see cref="SubscriptionManager{TKey}"/> is ready to
+    /// receive the next message for any of the subscribed streams.
     /// </summary>
-    public Func<CancellationToken, ValueTask<(TKey StreamId, object Message)>> GetNextMessage { get; init; }
+    /// <param name="requester">The <see cref="SubscriptionManager{TKey}"/> that
+    /// is requesting the subscription start.</param>
+    /// <param name="cancellationToken">Cancels the read operation.</param>
+    /// <exception cref="OperationCanceledException">Thrown when the operation
+    /// is cancelled, not only because of the cancellation token, but also
+    /// possibly because of internal data connections shutting down.</exception>
+    public delegate ValueTask<(TKey StreamId, object Message)> GetNextMessageDelegate(SubscriptionManager<TKey> requester, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// See <see cref="StartStreamDelegate{TKey}"/> for more information.
+    /// </summary>
+    public StartStreamDelegate StartStream { get; init; }
+
+    /// <summary>
+    /// See <see cref="EndStreamDelegate{TKey}"/> for more information.
+    /// </summary>
+    public EndStreamDelegate EndStream { get; init; }
+
+    /// <summary>
+    /// <see cref="GetNextMessageDelegate{TKey}"/> for more information.
+    /// </summary>
+    public GetNextMessageDelegate GetNextMessage { get; init; }
   }
 }
