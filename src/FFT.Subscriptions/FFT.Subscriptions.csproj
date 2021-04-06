@@ -2,6 +2,18 @@
 
   <PropertyGroup>
     <TargetFramework>net5</TargetFramework>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <IsPackable>true</IsPackable>
+
+    <PackageId>FFT.Subscriptions</PackageId>
+    <Summary>Redistributes data feed streams amongst various consuming components.</Summary>
+    <Description>$(Summary)</Description>
+    <Company>True Goodwill</Company>
+    <Authors>True Goodwill</Authors>
+    <PackageProjectUrl>https://github.com/FastFinTech/FFT.Subscriptions</PackageProjectUrl>
+    <RepositoryUrl>$(PackageProjectUrl)</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageTags>time;timestamp</PackageTags>
   </PropertyGroup>
 
   <ItemGroup>
