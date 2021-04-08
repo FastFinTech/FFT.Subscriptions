@@ -129,7 +129,6 @@ waitSignal:
 subscriptionsChanged:
 
         await signalTask;
-        signalTask = _subscriptionChangeEvent.WaitAsync(DisposedToken);
 
         foreach (var subscription in PopQueue(ref _subscriptionsToStart))
         {
@@ -158,18 +157,19 @@ subscriptionsChanged:
           subscription.Complete();
         }
 
+        signalTask = _subscriptionChangeEvent.WaitAsync(DisposedToken);
         goto waitSignal;
 
 handleMessage:
         {
           var (streamId, message) = await readTask;
-          readTask = _options.GetNextMessage(this, DisposedToken);
 
           if (streams.TryGetValue(streamId, out var stream))
           {
             stream.Handle(message);
           }
 
+          readTask = _options.GetNextMessage(this, DisposedToken);
           goto waitSignal;
         }
       }
