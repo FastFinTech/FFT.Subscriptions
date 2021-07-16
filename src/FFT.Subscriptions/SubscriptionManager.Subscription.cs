@@ -74,8 +74,8 @@ namespace FFT.Subscriptions
       /// Called by the <see cref="IBroadcastHub"/> to inform user code that no
       /// more messages will be provided for this subscription.
       /// </summary>
-      public void Complete()
-        => _channel.Writer.TryComplete();
+      public void Complete(Exception? error)
+        => _channel.Writer.TryComplete(error);
 
       /// <summary>
       /// Disposal is triggered by user code to inform us that that the

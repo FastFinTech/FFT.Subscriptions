@@ -1,6 +1,8 @@
 ﻿// Copyright (c) True Goodwill. All rights reserved.
 // Licensed under the MIT license. See LICENSE file in the project root for full license information.
 
+using System;
+
 namespace FFT.Subscriptions
 {
   /// <summary>
@@ -21,7 +23,7 @@ namespace FFT.Subscriptions
   public interface IBroadcastHub
   {
     /// <summary>
-    /// Gets the number of subscribers currently attached to this stream.
+    /// Gets the number of subscribers currently attached to this hub.
     /// </summary>
     int SubscriberCount { get; }
 
@@ -48,6 +50,6 @@ namespace FFT.Subscriptions
     /// Signal to all subscribers that no more messages will be published for
     /// this stream.
     /// </summary>
-    void Complete();
+    void Complete(Exception? error);
   }
 }

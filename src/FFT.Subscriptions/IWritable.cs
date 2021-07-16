@@ -9,6 +9,6 @@ namespace FFT.Subscriptions
   {
     void Write(object message);
 
-    void Complete();
+    void Complete(Exception? error);
   }
 }

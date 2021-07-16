@@ -22,7 +22,7 @@ namespace FFT.Subscriptions
     /// <summary>
     /// Use this reader to read messages from the subscription. This reader will
     /// be completed after you dispose the subscription or if the underlying
-    /// data supply failed.
+    /// data supply completes or fails.
     /// </summary>
     ChannelReader<object> Reader { get; }
   }

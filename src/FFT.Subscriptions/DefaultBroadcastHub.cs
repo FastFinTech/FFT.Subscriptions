@@ -3,6 +3,7 @@
 
 namespace FFT.Subscriptions
 {
+  using System;
   using System.Collections.Generic;
 
   /// <summary>
@@ -34,10 +35,10 @@ namespace FFT.Subscriptions
     }
 
     /// <inheritdoc/>
-    public void Complete()
+    public void Complete(Exception? error)
     {
       foreach (var subscriber in _subscribers)
-        subscriber.Complete();
+        subscriber.Complete(error);
     }
   }
 }

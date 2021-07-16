@@ -6,6 +6,7 @@ namespace FFT.Subscriptions
   using System;
   using System.Collections.Generic;
   using System.Collections.Immutable;
+  using System.Diagnostics.CodeAnalysis;
   using System.Threading;
   using System.Threading.Tasks;
   using FFT.Disposables;
@@ -46,6 +47,9 @@ namespace FFT.Subscriptions
     /// </summary>
     private ImmutableQueue<Subscription>? _subscriptionsToCancel = ImmutableQueue<Subscription>.Empty;
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="SubscriptionManager{TKey}"/> class.
+    /// </summary>
     public SubscriptionManager(SubscriptionManagerOptions<TKey> options)
     {
       _options = options;
@@ -65,17 +69,173 @@ namespace FFT.Subscriptions
       _subscriptionChangeEvent.Set();
       return subscription;
 
-      static ImmutableQueue<Subscription>? Transform(ImmutableQueue<Subscription>? list, Subscription subscription)
+      ImmutableQueue<Subscription>? Transform(ImmutableQueue<Subscription>? list, Subscription subscription)
       {
         // Check for disposal.
         if (list is null)
         {
           // Inform user code that no data will be provided for this subscription.
-          subscription.Complete();
+          subscription.Complete(DisposalReason);
           return null;
         }
 
         return list.Enqueue(subscription);
+      }
+    }
+
+    /// <inheritdoc/>
+    protected override ValueTask CustomDisposeAsync()
+      => new(_workTask);
+
+    /// <summary>
+    /// Thread-safely deques an item from the given <paramref name="queue"/>.
+    /// Returns true if an item was dequeued, false othewise.
+    /// </summary>
+    private static bool Pop<T>(ref ImmutableQueue<T>? queue, [NotNullWhen(true)] out T? item)
+      where T : class
+    {
+      T? result = null;
+      ImmutableInterlocked.Update(ref queue, q =>
+      {
+        if (q is null)
+        {
+          result = null;
+          return null;
+        }
+
+        if (q.IsEmpty)
+        {
+          result = null;
+          return q;
+        }
+
+        return q.Dequeue(out result);
+      });
+
+      item = result;
+      return item is not null;
+    }
+
+    private async Task WorkAsync()
+    {
+      Exception? workFailure = null;
+      var hubs = new Dictionary<TKey, IBroadcastHub>();
+
+      try
+      {
+        var signalTask = _subscriptionChangeEvent.WaitAsync(DisposedToken);
+        var readTask = _options.GetNextMessage(this, DisposedToken);
+
+waitSignal:
+        {
+          if (readTask.IsCompleted)
+            goto handleMessage;
+
+          if (signalTask.IsCompleted)
+            goto subscriptionsChanged;
+
+          await Task.WhenAny(signalTask, readTask.AsTask());
+          goto waitSignal;
+        }
+
+subscriptionsChanged:
+        {
+          await signalTask;
+
+          while (Pop(ref _subscriptionsToStart, out var subscription))
+          {
+            if (subscription.IsDisposeStarted)
+              continue;
+
+            if (!hubs.TryGetValue(subscription.StreamId, out var hub))
+            {
+              try
+              {
+                hub = await _options.StartStream(this, subscription.StreamId);
+                hubs[subscription.StreamId] = hub;
+              }
+              catch (Exception x)
+              {
+                subscription.Complete(x);
+                throw;
+              }
+            }
+
+            hub.AddSubscriber(subscription);
+          }
+
+          while (Pop(ref _subscriptionsToCancel, out var subscription))
+          {
+            if (hubs.TryGetValue(subscription.StreamId, out var hub))
+            {
+              hub.RemoveSubscriber(subscription);
+              if (hub.SubscriberCount == 0)
+              {
+                try
+                {
+                  await _options.EndStream(this, subscription.StreamId);
+                }
+                catch (Exception x)
+                {
+                  subscription.Complete(x);
+                  throw;
+                }
+
+                hub.Complete(null);
+                hubs.Remove(subscription.StreamId);
+              }
+            }
+
+            subscription.Complete(null);
+          }
+
+          signalTask = _subscriptionChangeEvent.WaitAsync(DisposedToken);
+          goto waitSignal;
+        }
+
+handleMessage:
+        {
+          var (streamId, message) = await readTask;
+          if (hubs.TryGetValue(streamId, out var hub))
+          {
+            hub.Handle(message);
+          }
+
+          readTask = _options.GetNextMessage(this, DisposedToken);
+          goto waitSignal;
+        }
+      }
+      catch (Exception x)
+      {
+        workFailure = x;
+      }
+      finally
+      {
+        var newSubscriptions = Interlocked.Exchange(ref _subscriptionsToStart, null);
+        if (newSubscriptions is not null)
+        {
+          foreach (var subscription in newSubscriptions)
+            subscription.Complete(workFailure ?? DisposalReason);
+        }
+
+        var cancelSubscriptions = Interlocked.Exchange(ref _subscriptionsToCancel, null);
+        if (cancelSubscriptions is not null)
+        {
+          foreach (var subscription in cancelSubscriptions)
+            subscription.Complete(workFailure ?? DisposalReason);
+        }
+
+        foreach (var (streamId, hub) in hubs)
+        {
+          try
+          {
+            await _options.EndStream(this, streamId);
+          }
+          catch { }
+          hub.Complete(workFailure ?? DisposalReason);
+        }
+
+        _ = DisposeAsync(workFailure);
       }
     }
 
@@ -89,138 +249,17 @@ namespace FFT.Subscriptions
       ImmutableInterlocked.Update(ref _subscriptionsToCancel, Transform, subscription);
       _subscriptionChangeEvent.Set();
 
-      static ImmutableQueue<Subscription>? Transform(ImmutableQueue<Subscription>? list, Subscription subscription)
+      ImmutableQueue<Subscription>? Transform(ImmutableQueue<Subscription>? list, Subscription subscription)
       {
         // Check for disposal.
         if (list is null)
         {
           // Inform user code that no data will be provided for this subscription.
-          subscription.Complete();
+          subscription.Complete(DisposalReason);
           return null;
         }
 
         return list.Enqueue(subscription);
-      }
-    }
-
-    protected override ValueTask CustomDisposeAsync()
-      => new(_workTask);
-
-    private async Task WorkAsync()
-    {
-      var streams = new Dictionary<TKey, IBroadcastHub>();
-
-      try
-      {
-        var signalTask = _subscriptionChangeEvent.WaitAsync(DisposedToken);
-        var readTask = _options.GetNextMessage(this, DisposedToken);
-
-waitSignal:
-
-        if (readTask.IsCompleted)
-          goto handleMessage;
-
-        if (signalTask.IsCompleted)
-          goto subscriptionsChanged;
-
-        await Task.WhenAny(signalTask, readTask.AsTask());
-        goto waitSignal;
-
-subscriptionsChanged:
-
-        await signalTask;
-
-        foreach (var subscription in PopQueue(ref _subscriptionsToStart))
-        {
-          if (!streams.TryGetValue(subscription.StreamId, out var stream))
-          {
-            stream = await _options.StartStream(this, subscription.StreamId);
-            streams[subscription.StreamId] = stream;
-          }
-
-          stream.AddSubscriber(subscription);
-        }
-
-        foreach (var subscription in PopQueue(ref _subscriptionsToCancel))
-        {
-          if (streams.TryGetValue(subscription.StreamId, out var stream))
-          {
-            stream.RemoveSubscriber(subscription);
-            if (stream.SubscriberCount == 0)
-            {
-              await _options.EndStream(this, subscription.StreamId);
-              stream.Complete();
-              streams.Remove(subscription.StreamId);
-            }
-          }
-
-          subscription.Complete();
-        }
-
-        signalTask = _subscriptionChangeEvent.WaitAsync(DisposedToken);
-        goto waitSignal;
-
-handleMessage:
-        {
-          var (streamId, message) = await readTask;
-
-          if (streams.TryGetValue(streamId, out var stream))
-          {
-            stream.Handle(message);
-          }
-
-          readTask = _options.GetNextMessage(this, DisposedToken);
-          goto waitSignal;
-        }
-      }
-      catch (Exception x)
-      {
-        _ = DisposeAsync(x);
-      }
-      finally
-      {
-        var newSubscriptions = Interlocked.Exchange(ref _subscriptionsToStart, null);
-        if (newSubscriptions is not null)
-        {
-          foreach (var subscription in newSubscriptions)
-            subscription.Complete();
-        }
-
-        var cancelSubscriptions = Interlocked.Exchange(ref _subscriptionsToCancel, null);
-        if (cancelSubscriptions is not null)
-        {
-          foreach (var subscription in cancelSubscriptions)
-            subscription.Complete();
-        }
-
-        foreach (var (streamId, stream) in streams)
-        {
-          try
-          {
-            await _options.EndStream(this, streamId);
-          }
-          catch { }
-          stream.Complete();
-        }
-
-        _ = DisposeAsync();
-      }
-    }
-
-    /// <summary>
-    /// Thread-safely gets the entire queue, replacing it with an empty queue.
-    /// Returns an empty queue if we have been disposed.
-    /// </summary>
-    private ImmutableQueue<Subscription> PopQueue(ref ImmutableQueue<Subscription>? queue)
-    {
-      ImmutableQueue<Subscription>? result = null;
-      ImmutableInterlocked.Update(ref queue, Transform);
-      return result ?? ImmutableQueue<Subscription>.Empty;
-
-      ImmutableQueue<Subscription>? Transform(ImmutableQueue<Subscription>? queue)
-      {
-        result = queue;
-        return result is null ? null : ImmutableQueue<Subscription>.Empty;
       }
     }
   }
