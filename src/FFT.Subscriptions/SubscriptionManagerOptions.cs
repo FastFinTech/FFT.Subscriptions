@@ -27,6 +27,13 @@ namespace FFT.Subscriptions
 #pragma warning disable CS8618 // Non-nullable field must contain a non-null value when exiting constructor. Consider declaring as nullable.
 
     /// <summary>
+    /// Called only once, when the subscription manager has just started up.
+    /// </summary>
+    /// <param name="requester">The <see cref="SubscriptionManager{TKey}"/> that
+    /// is requesting the initialization.</param>
+    public delegate ValueTask InitialiseDelegate(SubscriptionManager<TKey> requester);
+
+    /// <summary>
     /// Called when the first subscription is made for a given stream. Starts
     /// the underlying data connection.
     /// </summary>
@@ -65,17 +72,22 @@ namespace FFT.Subscriptions
     public delegate ValueTask<(TKey StreamId, object Message)> GetNextMessageDelegate(SubscriptionManager<TKey> requester, CancellationToken cancellationToken);
 
     /// <summary>
-    /// See <see cref="StartStreamDelegate{TKey}"/> for more information.
+    /// <see cref="InitialiseDelegate"/> for more information.
+    /// </summary>
+    public InitialiseDelegate? Initialize { get; init; }
+
+    /// <summary>
+    /// See <see cref="StartStreamDelegate"/> for more information.
     /// </summary>
     public StartStreamDelegate StartStream { get; init; }
 
     /// <summary>
-    /// See <see cref="EndStreamDelegate{TKey}"/> for more information.
+    /// See <see cref="EndStreamDelegate"/> for more information.
     /// </summary>
     public EndStreamDelegate EndStream { get; init; }
 
     /// <summary>
-    /// <see cref="GetNextMessageDelegate{TKey}"/> for more information.
+    /// <see cref="GetNextMessageDelegate"/> for more information.
     /// </summary>
     public GetNextMessageDelegate GetNextMessage { get; init; }
   }

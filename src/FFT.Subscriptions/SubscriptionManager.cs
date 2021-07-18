@@ -124,6 +124,11 @@ namespace FFT.Subscriptions
 
       try
       {
+        if (_options.Initialize is not null)
+        {
+          await _options.Initialize(this).ConfigureAwait(false);
+        }
+
         var signalTask = _subscriptionChangeEvent.WaitAsync(DisposedToken);
         var readTask = _options.GetNextMessage(this, DisposedToken);
 
