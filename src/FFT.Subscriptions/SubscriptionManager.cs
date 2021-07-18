@@ -10,6 +10,7 @@ namespace FFT.Subscriptions
   using System.Threading;
   using System.Threading.Tasks;
   using FFT.Disposables;
+  using FFT.IgnoreTasks;
   using Nito.AsyncEx;
 
   public sealed partial class SubscriptionManager<TKey> : AsyncDisposeBase
@@ -235,7 +236,7 @@ handleMessage:
           hub.Complete(workFailure ?? DisposalReason);
         }
 
-        _ = DisposeAsync(workFailure);
+        DisposeAsync(workFailure).Ignore();
       }
     }
 

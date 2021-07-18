@@ -20,9 +20,11 @@ namespace FFT.Subscriptions
   public interface ISubscription : IDisposable
   {
     /// <summary>
-    /// Use this reader to read messages from the subscription. This reader will
-    /// be completed after you dispose the subscription or if the underlying
-    /// data supply completes or fails.
+    /// Use this reader to read messages from the subscription. This reader's
+    /// ReadAllAsync method will complete without exception if you dispose the
+    /// subscription to stop it. If the subscription is stopped due to some
+    /// other issue, including disposal of the subscription manager, the
+    /// ReadAllAsync method will throw an exception.
     /// </summary>
     ChannelReader<object> Reader { get; }
   }

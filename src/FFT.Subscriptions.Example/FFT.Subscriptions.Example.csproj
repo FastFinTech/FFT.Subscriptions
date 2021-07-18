@@ -12,6 +12,7 @@
   <ItemGroup>
     <PackageReference Include="ConfigureAwait.Fody" Version="3.3.1" PrivateAssets="all" />
     <PackageReference Include="FFT.Disposables" Version="0.0.6" />
+    <PackageReference Include="FFT.IgnoreTasks" Version="0.0.7" />
     <PackageReference Include="Fody" Version="6.5.1">
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
