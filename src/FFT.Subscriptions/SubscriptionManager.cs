@@ -58,6 +58,11 @@ namespace FFT.Subscriptions
     }
 
     /// <summary>
+    /// Gets a list of the keys of active subscriptions.
+    /// </summary>
+    public ImmutableList<TKey> ActiveSubscriptionKeys { get; private set; } = ImmutableList<TKey>.Empty;
+
+    /// <summary>
     /// Call this method to create a new subscription to the given <paramref
     /// name="streamId"/>. Internally, new data connections may be created if
     /// this is the first subscription for a particular <paramref
@@ -159,6 +164,7 @@ subscriptionsChanged:
               {
                 hub = await _options.StartStream(this, subscription.StreamId);
                 hubs[subscription.StreamId] = hub;
+                ActiveSubscriptionKeys = ActiveSubscriptionKeys.Add(subscription.StreamId);
               }
               catch (Exception x)
               {
@@ -189,6 +195,7 @@ subscriptionsChanged:
 
                 hub.Complete(null);
                 hubs.Remove(subscription.StreamId);
+                ActiveSubscriptionKeys = ActiveSubscriptionKeys.Remove(subscription.StreamId);
               }
             }
 
@@ -217,6 +224,8 @@ handleMessage:
       }
       finally
       {
+        ActiveSubscriptionKeys = ImmutableList<TKey>.Empty;
+
         var newSubscriptions = Interlocked.Exchange(ref _subscriptionsToStart, null);
         if (newSubscriptions is not null)
         {
