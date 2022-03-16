@@ -162,7 +162,7 @@ subscriptionsChanged:
             {
               try
               {
-                hub = await _options.StartStream(this, subscription.StreamId);
+                hub = await _options.StartStream(this, subscription.StreamId, DisposedToken);
                 hubs[subscription.StreamId] = hub;
                 ActiveSubscriptionKeys = ActiveSubscriptionKeys.Add(subscription.StreamId);
               }

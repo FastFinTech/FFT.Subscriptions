@@ -48,7 +48,7 @@ namespace FFT.Subscriptions
     /// <exception cref="OperationCanceledException">Thrown when the operation
     /// is cancelled, not only because of the cancellation token, but also
     /// possibly because of internal data connections shutting down.</exception>
-    public delegate ValueTask<IBroadcastHub> StartStreamDelegate(SubscriptionManager<TKey> requester, TKey streamId, CancellationToken cancellationToken = default);
+    public delegate ValueTask<IBroadcastHub> StartStreamDelegate(SubscriptionManager<TKey> requester, TKey streamId, CancellationToken cancellationToken);
 
     /// <summary>
     /// Called when the last subscription is cancelled for a given stream. Ends
