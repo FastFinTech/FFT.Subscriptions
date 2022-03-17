@@ -32,16 +32,16 @@ namespace FFT.Subscriptions
     /// </remarks>
     internal sealed class Subscription : DisposeBase, ISubscription, IWritable
     {
-      private readonly SubscriptionManager<TKey> _manager;
+      private readonly Action<Subscription> _onDisposed;
 
       private readonly Channel<object> _channel = Debugger.IsAttached
         ? Channel.CreateUnbounded<object>()
         : Channel.CreateBounded<object>(100);
 
-      public Subscription(SubscriptionManager<TKey> manager, TKey streamId)
+      public Subscription(TKey streamId, Action<Subscription> onDisposed)
       {
-        _manager = manager;
         StreamId = streamId;
+        _onDisposed = onDisposed;
       }
 
       public TKey StreamId { get; }
@@ -83,7 +83,7 @@ namespace FFT.Subscriptions
       /// cref="ISubscription"/> interface.
       /// </summary>
       protected override void CustomDispose()
-        => _manager.Unsubscribe(this);
+        => _onDisposed(this);
     }
   }
 }

@@ -70,57 +70,27 @@ namespace FFT.Subscriptions
     /// </summary>
     public ISubscription Subscribe(TKey streamId)
     {
-      var subscription = new Subscription(this, streamId);
-      ImmutableInterlocked.Update(ref _subscriptionsToStart, Transform, subscription);
-      _subscriptionChangeEvent.Set();
-      return subscription;
-
-      ImmutableQueue<Subscription>? Transform(ImmutableQueue<Subscription>? list, Subscription subscription)
+      var subscription = new Subscription(streamId, Unsubscribe);
+      ImmutableInterlocked.Update(ref _subscriptionsToStart, q =>
       {
-        // Check for disposal.
-        if (list is null)
+        if (q is null)
         {
-          // Inform user code that no data will be provided for this subscription.
+          // We are disposed. Since the subscription won't be added to any
+          // queue, it needs to be marked complete for the benefit of the
+          // subscriber.
           subscription.Complete(DisposalReason);
           return null;
         }
 
-        return list.Enqueue(subscription);
-      }
+        return q.Enqueue(subscription);
+      });
+      _subscriptionChangeEvent.Set();
+      return subscription;
     }
 
     /// <inheritdoc/>
     protected override ValueTask CustomDisposeAsync()
       => new(_workTask);
-
-    /// <summary>
-    /// Thread-safely deques an item from the given <paramref name="queue"/>.
-    /// Returns true if an item was dequeued, false othewise.
-    /// </summary>
-    private static bool Pop<T>(ref ImmutableQueue<T>? queue, [NotNullWhen(true)] out T? item)
-      where T : class
-    {
-      T? result = null;
-      ImmutableInterlocked.Update(ref queue, q =>
-      {
-        if (q is null)
-        {
-          result = null;
-          return null;
-        }
-
-        if (q.IsEmpty)
-        {
-          result = null;
-          return q;
-        }
-
-        return q.Dequeue(out result);
-      });
-
-      item = result;
-      return item is not null;
-    }
 
     private async Task WorkAsync()
     {
@@ -131,29 +101,29 @@ namespace FFT.Subscriptions
       {
         if (_options.Initialize is not null)
         {
-          await _options.Initialize(this).ConfigureAwait(false);
+          await _options.Initialize(this);
         }
 
-        var signalTask = _subscriptionChangeEvent.WaitAsync(DisposedToken);
-        var readTask = _options.GetNextMessage(this, DisposedToken);
+        var subscriptionChangedTask = _subscriptionChangeEvent.WaitAsync(DisposedToken);
+        var messageReadyTask = _options.GetNextMessage(this, DisposedToken);
 
-waitSignal:
+chooseWork:
         {
-          if (readTask.IsCompleted)
-            goto handleMessage;
+          if (messageReadyTask.IsCompleted)
+            goto messageReady;
 
-          if (signalTask.IsCompleted)
+          if (subscriptionChangedTask.IsCompleted)
             goto subscriptionsChanged;
 
-          await Task.WhenAny(signalTask, readTask.AsTask());
-          goto waitSignal;
+          await Task.WhenAny(subscriptionChangedTask, messageReadyTask.AsTask());
+          goto chooseWork;
         }
 
 subscriptionsChanged:
         {
-          await signalTask;
+          await subscriptionChangedTask;
 
-          while (Pop(ref _subscriptionsToStart, out var subscription))
+          while (Dequeue(ref _subscriptionsToStart, out var subscription))
           {
             if (subscription.IsDisposeStarted)
               continue;
@@ -163,20 +133,21 @@ subscriptionsChanged:
               try
               {
                 hub = await _options.StartStream(this, subscription.StreamId, DisposedToken);
-                hubs[subscription.StreamId] = hub;
-                ActiveSubscriptionKeys = ActiveSubscriptionKeys.Add(subscription.StreamId);
               }
               catch (Exception x)
               {
                 subscription.Complete(x);
                 throw;
               }
+
+              hubs[subscription.StreamId] = hub;
+              ActiveSubscriptionKeys = ActiveSubscriptionKeys.Add(subscription.StreamId);
             }
 
             hub.AddSubscriber(subscription);
           }
 
-          while (Pop(ref _subscriptionsToCancel, out var subscription))
+          while (Dequeue(ref _subscriptionsToCancel, out var subscription))
           {
             if (hubs.TryGetValue(subscription.StreamId, out var hub))
             {
@@ -202,23 +173,23 @@ subscriptionsChanged:
             subscription.Complete(null);
           }
 
-          signalTask = _subscriptionChangeEvent.WaitAsync(DisposedToken);
-          goto waitSignal;
+          subscriptionChangedTask = _subscriptionChangeEvent.WaitAsync(DisposedToken);
+          goto chooseWork;
         }
 
-handleMessage:
+messageReady:
         {
-          var (streamId, message) = await readTask;
+          var (streamId, message) = await messageReadyTask;
           if (hubs.TryGetValue(streamId, out var hub))
           {
             hub.Handle(message);
           }
 
-          readTask = _options.GetNextMessage(this, DisposedToken);
-          goto waitSignal;
+          messageReadyTask = _options.GetNextMessage(this, DisposedToken);
+          goto chooseWork;
         }
       }
-      catch (Exception x)
+      catch (Exception x) when (x is not OperationCanceledException)
       {
         workFailure = x;
       }
@@ -226,31 +197,27 @@ handleMessage:
       {
         ActiveSubscriptionKeys = ImmutableList<TKey>.Empty;
 
-        var newSubscriptions = Interlocked.Exchange(ref _subscriptionsToStart, null);
-        if (newSubscriptions is not null)
+        var pendingNewSubscriptions = Interlocked.Exchange(ref _subscriptionsToStart, null);
+        if (pendingNewSubscriptions is not null)
         {
-          foreach (var subscription in newSubscriptions)
+          foreach (var subscription in pendingNewSubscriptions)
             subscription.Complete(workFailure ?? DisposalReason);
         }
 
-        var cancelSubscriptions = Interlocked.Exchange(ref _subscriptionsToCancel, null);
-        if (cancelSubscriptions is not null)
+        var pendingCancelSubscriptions = Interlocked.Exchange(ref _subscriptionsToCancel, null);
+        if (pendingCancelSubscriptions is not null)
         {
-          foreach (var subscription in cancelSubscriptions)
+          foreach (var subscription in pendingCancelSubscriptions)
             subscription.Complete(workFailure ?? DisposalReason);
         }
 
         foreach (var (streamId, hub) in hubs)
         {
-          try
-          {
-            await _options.EndStream(this, streamId);
-          }
-          catch { }
+          try { await _options.EndStream(this, streamId); } catch { }
           hub.Complete(workFailure ?? DisposalReason);
         }
 
-        DisposeAsync(workFailure).Ignore();
+        KickoffDispose(workFailure);
       }
     }
 
@@ -261,21 +228,48 @@ handleMessage:
     /// </summary>
     private void Unsubscribe(Subscription subscription)
     {
-      ImmutableInterlocked.Update(ref _subscriptionsToCancel, Transform, subscription);
-      _subscriptionChangeEvent.Set();
-
-      ImmutableQueue<Subscription>? Transform(ImmutableQueue<Subscription>? list, Subscription subscription)
+      ImmutableInterlocked.Update(ref _subscriptionsToCancel, q =>
       {
-        // Check for disposal.
-        if (list is null)
+        if (q is null)
         {
-          // Inform user code that no data will be provided for this subscription.
           subscription.Complete(DisposalReason);
           return null;
         }
 
-        return list.Enqueue(subscription);
-      }
+        return q.Enqueue(subscription);
+      });
+
+      _subscriptionChangeEvent.Set();
+    }
+
+    /// <summary>
+    /// Thread-safely deques an item from the given <paramref name="queue"/>.
+    /// Returns true if an item was dequeued, false othewise.
+    /// </summary>
+    private static bool Dequeue<T>(ref ImmutableQueue<T>? queue, [NotNullWhen(true)] out T? item)
+      where T : class
+    {
+      T? result = null;
+      ImmutableInterlocked.Update(ref queue, q =>
+      {
+        if (q is null)
+        {
+          // We are disposed
+          result = null;
+          return null;
+        }
+
+        if (q.IsEmpty)
+        {
+          result = null;
+          return q;
+        }
+
+        return q.Dequeue(out result);
+      });
+
+      item = result;
+      return item is not null;
     }
   }
 }
