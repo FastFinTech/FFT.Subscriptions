@@ -189,9 +189,12 @@ messageReady:
           goto chooseWork;
         }
       }
-      catch (Exception x) when (x is not OperationCanceledException)
+      catch (Exception x)
       {
-        workFailure = x;
+        if (x is not OperationCanceledException)
+        {
+          workFailure = x;
+        }
       }
       finally
       {
